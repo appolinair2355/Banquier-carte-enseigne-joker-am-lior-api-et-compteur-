@@ -79,7 +79,8 @@ reset_done_for_cycle: bool = False
 # Compteur de prédictions (N dans le message joueur#N:game)
 prediction_counter: int = 0
 
-# ── Compteur instantané (envoyé en DM aux admins à chaque reset) ───────────────
+# ── Compteur instantané (DM aux admins, édité en temps réel) ──────────────────
+counter_dm_message_ids: Dict[int, int] = {}   # {admin_id: message_id}
 
 # ── Suivi des écarts (gap tracker) ───────────────────────────────────────────
 # Pour chaque costume: écart courant (parties sans apparition), historique, max
@@ -296,19 +297,18 @@ def build_counter_message() -> str:
     )
 
 async def send_or_update_counter_message(force: bool = False):
-    """Envoie le compteur en DM privé à tous les admins.
+    """Gère le message compteur banquier en DM privé pour tous les admins.
 
-    - Appelé uniquement lors d'un reset (force=True).
-    - Envoie toujours un NOUVEAU message (pas d'édition).
+    - force=False (après chaque partie banquier) : ÉDITE le message existant.
+      Si aucun message n'existe encore, en crée un nouveau.
+    - force=True (reset horaire ou reset complet) : envoie toujours un NOUVEAU
+      message et réinitialise les IDs stockés.
     - N'envoie jamais dans le canal de prédiction.
     """
-    if not force:
-        return
+    global counter_dm_message_ids
 
     if not client or not client.is_connected():
         return
-
-    msg = build_counter_message()
 
     all_admin_ids = []
     if ADMIN_ID and ADMIN_ID != 0:
@@ -317,12 +317,37 @@ async def send_or_update_counter_message(force: bool = False):
         if aid not in all_admin_ids:
             all_admin_ids.append(aid)
 
+    if not all_admin_ids:
+        return
+
+    msg = build_counter_message()
+
     for admin_id in all_admin_ids:
         try:
-            await client.send_message(admin_id, msg)
-            logger.info(f"📈 Compteur banquier envoyé en DM à admin {admin_id}")
+            if force:
+                # Reset → nouveau message, on oublie l'ancien
+                sent = await client.send_message(admin_id, msg)
+                counter_dm_message_ids[admin_id] = sent.id
+                logger.info(f"📈 Nouveau compteur (reset) envoyé en DM à admin {admin_id}")
+            else:
+                existing_id = counter_dm_message_ids.get(admin_id)
+                if existing_id:
+                    # Éditer le message existant
+                    try:
+                        await client.edit_message(admin_id, existing_id, msg)
+                        logger.debug(f"📈 Compteur édité en DM pour admin {admin_id}")
+                    except Exception:
+                        # Message supprimé ou inaccessible → en créer un nouveau
+                        sent = await client.send_message(admin_id, msg)
+                        counter_dm_message_ids[admin_id] = sent.id
+                        logger.info(f"📈 Compteur recréé en DM pour admin {admin_id}")
+                else:
+                    # Pas encore de message → en créer un
+                    sent = await client.send_message(admin_id, msg)
+                    counter_dm_message_ids[admin_id] = sent.id
+                    logger.info(f"📈 Compteur initial créé en DM pour admin {admin_id}")
         except Exception as e:
-            logger.error(f"❌ Erreur envoi compteur à admin {admin_id}: {e}")
+            logger.error(f"❌ Erreur compteur DM admin {admin_id}: {e}")
 
 # ============================================================================
 # HISTORIQUE DES PRÉDICTIONS
@@ -643,6 +668,9 @@ async def process_compteur2(game_number: int, player_suits: List[str], player_ca
     # --- Mettre à jour les écarts (gap tracker) ---
     update_gap_tracker(game_number, player_suits)
 
+    # --- Éditer le message compteur en DM chez les admins ---
+    await send_or_update_counter_message()
+
     # --- Vérifier chaque paire inverse pour le seuil BP ---
     for suit_a, suit_b in INVERSE_PAIRS:
         count_a = compteur2_counts[suit_a]
@@ -916,7 +944,7 @@ async def perform_full_reset(reason: str):
     global player_processed_games, player_prediction_triggered, api_results_cache
     global last_prediction_game, reset_done_for_cycle, prediction_counter
     global gap_games_processed, game_timestamps, cycle_start_time, cycle_first_game, cycle_last_game
-    global special_games_processed
+    global special_games_processed, counter_dm_message_ids
 
     stats = len(pending_predictions)
     pending_predictions.clear()
@@ -929,6 +957,7 @@ async def perform_full_reset(reason: str):
     player_prediction_triggered = set()
     api_results_cache = {}
     prediction_counter = 0
+    counter_dm_message_ids = {}   # Forcer un nouveau message compteur au prochain cycle
 
     # Réinitialiser le gap tracker pour le nouveau cycle
     # On conserve max_gap (record historique global) mais on repart de zéro pour ce cycle
