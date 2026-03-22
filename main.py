@@ -79,10 +79,7 @@ reset_done_for_cycle: bool = False
 # Compteur de prédictions (N dans le message joueur#N:game)
 prediction_counter: int = 0
 
-# ── Compteur instantané (message live dans le canal) ──────────────────────────
-counter_message_id: Optional[int] = None        # ID du message compteur dans le canal
-counter_message_last_update: Optional[datetime] = None  # Pour limiter la fréquence des éditions
-COUNTER_UPDATE_INTERVAL = 20                    # secondes minimum entre deux mises à jour
+# ── Compteur instantané (envoyé en DM aux admins à chaque reset) ───────────────
 
 # ── Suivi des écarts (gap tracker) ───────────────────────────────────────────
 # Pour chaque costume: écart courant (parties sans apparition), historique, max
@@ -284,60 +281,48 @@ async def resolve_channel(entity_id):
 # ============================================================================
 
 def build_counter_message() -> str:
-    """Construit le texte du message compteur instantané."""
-    now = datetime.now()
-    reset_str = compteur2_last_reset.strftime('%H:%M') if compteur2_last_reset else "—"
-    next_reset = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    """Construit le texte du message compteur instantané (heure WAT Bénin/Cameroun)."""
+    now_wat = get_local_time()
+    reset_str = (compteur2_last_reset + timedelta(hours=1)).strftime('%H:%M') if compteur2_last_reset else now_wat.strftime('%H:%M')
+    next_reset = (now_wat + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
     return (
-        f"📈 **Compteur banquier instantané**\n"
+        f"📈 **Compteur banquier**\n"
         f"♠️ : {compteur2_counts.get('♠', 0)}\n"
         f"♥️ : {compteur2_counts.get('♥', 0)}\n"
         f"♦️ : {compteur2_counts.get('♦', 0)}\n"
         f"♣️ : {compteur2_counts.get('♣', 0)}\n\n"
-        f"🔄 Reset: {reset_str} | ⏭ Prochain: {next_reset.strftime('%H:%M')}"
+        f"🕐 Reset effectué: {reset_str} WAT\n"
+        f"⏭ Prochain reset: {next_reset.strftime('%H:%M')} WAT"
     )
 
 async def send_or_update_counter_message(force: bool = False):
-    """Envoie ou édite le message de compteur instantané dans le canal.
+    """Envoie le compteur en DM privé à tous les admins.
 
-    - Si force=True, met à jour immédiatement (reset horaire, reset complet).
-    - Sinon, respecte l'intervalle minimum COUNTER_UPDATE_INTERVAL.
+    - Appelé uniquement lors d'un reset (force=True).
+    - Envoie toujours un NOUVEAU message (pas d'édition).
+    - N'envoie jamais dans le canal de prédiction.
     """
-    global counter_message_id, counter_message_last_update
-
-    if not PREDICTION_CHANNEL_ID or not client or not client.is_connected():
+    if not force:
         return
 
-    # Throttle pour éviter trop d'éditions Telegram
-    if not force and counter_message_last_update:
-        elapsed = (datetime.now() - counter_message_last_update).total_seconds()
-        if elapsed < COUNTER_UPDATE_INTERVAL:
-            return
+    if not client or not client.is_connected():
+        return
 
-    try:
-        prediction_entity = await resolve_channel(PREDICTION_CHANNEL_ID)
-        if not prediction_entity:
-            return
+    msg = build_counter_message()
 
-        msg = build_counter_message()
+    all_admin_ids = []
+    if ADMIN_ID and ADMIN_ID != 0:
+        all_admin_ids.append(ADMIN_ID)
+    for aid in EXTRA_ADMIN_IDS:
+        if aid not in all_admin_ids:
+            all_admin_ids.append(aid)
 
-        if counter_message_id:
-            try:
-                await client.edit_message(prediction_entity, counter_message_id, msg)
-                counter_message_last_update = datetime.now()
-                return
-            except Exception:
-                # Message supprimé ou inaccessible → en créer un nouveau
-                counter_message_id = None
-
-        # Créer un nouveau message compteur
-        sent = await client.send_message(prediction_entity, msg)
-        counter_message_id = sent.id
-        counter_message_last_update = datetime.now()
-        logger.info(f"📈 Message compteur créé (ID: {counter_message_id})")
-
-    except Exception as e:
-        logger.error(f"❌ Erreur update compteur: {e}")
+    for admin_id in all_admin_ids:
+        try:
+            await client.send_message(admin_id, msg)
+            logger.info(f"📈 Compteur banquier envoyé en DM à admin {admin_id}")
+        except Exception as e:
+            logger.error(f"❌ Erreur envoi compteur à admin {admin_id}: {e}")
 
 # ============================================================================
 # HISTORIQUE DES PRÉDICTIONS
@@ -404,7 +389,7 @@ def build_prediction_message(counter: int, game_number: int, suit: str, rattrapa
     """Construit le message de prédiction au format unifié."""
     suit_display = SUIT_DISPLAY.get(suit, suit)
     return (
-        f"🎮 banquier №{counter}\n"
+        f"🎮 banquier №{game_number}\n"
         f"⚜️ Couleur de la carte:{suit_display}\n"
         f"🎰 Poursuite  🔰+{MAX_RATTRAPAGE} jeux\n"
         f"🗯️ Résultats : {result}"
@@ -658,9 +643,6 @@ async def process_compteur2(game_number: int, player_suits: List[str], player_ca
     # --- Mettre à jour les écarts (gap tracker) ---
     update_gap_tracker(game_number, player_suits)
 
-    # --- Mettre à jour le message compteur live dans le canal ---
-    await send_or_update_counter_message()
-
     # --- Vérifier chaque paire inverse pour le seuil BP ---
     for suit_a, suit_b in INVERSE_PAIRS:
         count_a = compteur2_counts[suit_a]
@@ -684,6 +666,14 @@ async def process_compteur2(game_number: int, player_suits: List[str], player_ca
             f"🔮 Compteur2: paire {SUIT_DISPLAY.get(suit_a, suit_a)}/{SUIT_DISPLAY.get(suit_b, suit_b)} "
             f"diff={diff} >= BP={compteur2_bp} → prédit {SUIT_DISPLAY.get(predict_suit, predict_suit)} jeu #{pred_game}"
         )
+
+        # ── Règle 0 : Jeu prédit déjà apparu dans l'API → trop tard ────
+        if pred_game in api_results_cache:
+            logger.info(
+                f"⏸ Prédiction #{pred_game} {SUIT_DISPLAY.get(predict_suit, predict_suit)} ignorée: "
+                f"jeu #{pred_game} déjà commencé dans l'API"
+            )
+            continue
 
         # ── Règle 1 : Restriction horaire H:00-H:29 uniquement ──────────
         if not is_prediction_time_allowed():
