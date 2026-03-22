@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: baccarat-ai
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: PREDICTION_CHANNEL_ID
+        sync: false
+      - key: TELEGRAM_SESSION
+        sync: false
+      - key: COMPTEUR2_ACTIVE
+        value: "true"
+      - key: COMPTEUR2_B
+        value: "4"
+      - key: API_POLL_INTERVAL
+        value: "5"
