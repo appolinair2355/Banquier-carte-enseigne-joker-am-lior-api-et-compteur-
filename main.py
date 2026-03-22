@@ -695,11 +695,12 @@ async def process_compteur2(game_number: int, player_suits: List[str], player_ca
             f"diff={diff} >= BP={compteur2_bp} → prédit {SUIT_DISPLAY.get(predict_suit, predict_suit)} jeu #{pred_game}"
         )
 
-        # ── Règle 0 : Jeu prédit déjà apparu dans l'API → trop tard ────
-        if pred_game in api_results_cache:
+        # ── Règle 0 : Banquier a déjà tiré ses cartes pour ce jeu → trop tard ──
+        pred_cached = api_results_cache.get(pred_game)
+        if pred_cached and len(pred_cached.get('banker_cards', [])) >= 2:
             logger.info(
                 f"⏸ Prédiction #{pred_game} {SUIT_DISPLAY.get(predict_suit, predict_suit)} ignorée: "
-                f"jeu #{pred_game} déjà commencé dans l'API"
+                f"banquier jeu #{pred_game} a déjà tiré ses cartes"
             )
             continue
 
